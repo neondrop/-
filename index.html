@@ -1227,6 +1227,7 @@ window.CASE_IMAGES=["https://community.akamai.steamstatic.com/economy/image/i0Co
   'use strict';
   let context,master,timer,sequence=0;
   const voices=new Set(),level=.145;
+  const samples=new Map();
   const enabled=()=>global.Game.state.ui.soundEnabled;
   function unlock(){
     if(!enabled())return Promise.resolve(false);
@@ -1248,29 +1249,73 @@ window.CASE_IMAGES=["https://community.akamai.steamstatic.com/economy/image/i0Co
     osc.connect(gain);gain.connect(master);const voice={osc,gain};voices.add(voice);
     osc.start(start);osc.stop(start+length+.025);osc.onended=()=>{voices.delete(voice);osc.disconnect();gain.disconnect();};
   }
+  // CS2's Panorama uses container_weapon_open, container_weapon_ticker and a
+  // separate item reveal. Original samples below follow that structure.
+  // Reference: https://github.com/SteamTracking/GameTracking-CS2/blob/master/game/csgo/pak01_dir/panorama/scripts/popups/popup_capability_decodable.js
+  // Samples are generated locally; no audio downloads during play.
+  function sample(kind){
+    if(samples.has(kind))return samples.get(kind);
+    if(!context.createBuffer||!context.createBufferSource)return null;
+    const profiles={
+      tick:[.043,.62,.0038,610,.24,.012,1180,.12,.009],
+      upgrade:[.032,.65,.003,920,.18,.008,1380,.08,.005],
+      battle:[.051,.55,.0045,345,.28,.019,780,.13,.012],
+      wood:[.048,.45,.004,370,.36,.014,740,.12,.009],
+      latch:[.19,.52,.022,145,.3,.055,480,.14,.029],
+      reveal:[.36,.12,.08,280,.3,.15,420,.15,.11],
+      air:[.24,.45,.068,170,.07,.09,340,.04,.06],
+      coin:[.17,.18,.006,1420,.35,.047,1890,.17,.039],
+      dull:[.12,.38,.009,190,.32,.035,530,.12,.023],
+      glass:[.26,.08,.005,740,.28,.081,1110,.15,.064],
+      gem:[.3,.06,.004,880,.28,.092,1320,.14,.068],
+      impact:[.26,.65,.049,85,.35,.062,170,.1,.032]
+    },p=profiles[kind]||profiles.tick,rate=context.sampleRate||44100,buffer=context.createBuffer(1,Math.ceil(rate*p[0]),rate),data=buffer.getChannelData(0);let seed=19381,previous=0;
+    for(let i=0;i<data.length;i++){
+      const t=i/rate;seed=(Math.imul(seed,1664525)+1013904223)>>>0;const white=seed/2147483648-1,noise=white*.72+previous*.28;previous=white;
+      const attack=Math.min(1,t/.00065),tail=Math.min(1,(data.length-1-i)/(rate*.009));
+      data[i]=attack*tail*(noise*p[1]*Math.exp(-t/p[2])+Math.sin(2*Math.PI*p[3]*t)*p[4]*Math.exp(-t/p[5])+Math.sin(2*Math.PI*p[6]*t)*p[7]*Math.exp(-t/p[8]));
+    }
+    samples.set(kind,buffer);return buffer;
+  }
+  function play(kind,delay=0,volume=.2,rate=1){
+    if(!enabled()||!context||context.state!=='running')return;
+    const buffer=sample(kind);if(!buffer){tone(kind==='upgrade'?260:180,delay,.035,volume*.4,undefined,'triangle');return;}
+    const start=context.currentTime+Math.max(0,delay),source=context.createBufferSource(),gain=context.createGain();source.buffer=buffer;source.playbackRate.setValueAtTime(rate,start);gain.gain.setValueAtTime(volume,start);source.connect(gain);gain.connect(master);
+    const voice={osc:source,gain};voices.add(voice);source.start(start);source.stop(start+buffer.duration/rate+.012);source.onended=()=>{voices.delete(voice);source.disconnect();gain.disconnect();};
+  }
+  function crossingTime(progress,easing){
+    const [x1,y1,x2,y2]=easing,curve=(t,a,b)=>3*(1-t)*(1-t)*t*a+3*(1-t)*t*t*b+t*t*t;let lo=0,hi=1;
+    for(let i=0;i<30;i++){const mid=(lo+hi)/2;if(curve(mid,y1,y2)<progress)lo=mid;else hi=mid;}
+    return curve((lo+hi)/2,x1,x2);
+  }
+  function rollClicks(kind,duration,options,elapsed){
+    const defaults={case:27,battle:24,cashback:27,upgrade:32},steps=Number.isFinite(options.steps)?Math.min(160,Math.max(1,Math.ceil(options.steps))):defaults[kind],candidate=options.easing,easing=Array.isArray(candidate)&&candidate.length===4&&candidate.every(n=>Number.isFinite(n)&&n>=0&&n<=1)?candidate:[.12,.62,.12,1],sampleKind=kind==='case'?'tick':kind==='cashback'?'wood':kind;
+    let last=-Infinity;
+    for(let i=1;i<=steps;i++){
+      const at=duration*crossingTime((i-.5)/steps,easing);if(at<elapsed||at-last<20||at>duration-12)continue;
+      last=at;play(sampleKind,(at-elapsed)/1000,kind==='case'?.22:kind==='upgrade'?.16:kind==='battle'?.2:.18,.98+(i%3)*.012);
+    }
+  }
   function stop(){
     sequence++;clearTimeout(timer);timer=null;if(!context)return;
     const now=context.currentTime;
     for(const {osc,gain} of voices){try{if(gain.gain.cancelAndHoldAtTime)gain.gain.cancelAndHoldAtTime(now);else{gain.gain.cancelScheduledValues(now);gain.gain.setValueAtTime(.0001,now);}gain.gain.setTargetAtTime(.0001,now,.012);osc.stop(now+.055);}catch{}}
   }
-  function start(kind,duration){
+  function start(kind,duration,options={}){
     stop();const token=sequence,begun=performance.now();
     unlock().then(ready=>{
       if(!ready||token!==sequence||performance.now()-begun>=duration)return;
-      if(kind==='case')tone(110,0,.35,.24,145);
-      if(kind==='upgrade'){tone(164.81,0,Math.min(1.2,duration/1000),.17,220,'triangle');tone(246.94,.06,Math.min(1.1,duration/1000),.13,329.63);}
-      if(kind==='contract')[261.63,329.63,392].forEach((f,i)=>tone(f,i*.16,.7,.17,f*1.015));
-      if(kind==='cashback')tone(220,0,.25,.17,293.66);
-      if(kind==='battle'){tone(146.83,0,.35,.18,196,'triangle');tone(220,.07,.28,.14);}
+      if(['case','upgrade','cashback','battle'].includes(kind)){
+        if(kind==='case'&&duration>=500){play('latch',0,.2);play('wood',.046,.14);}
+        rollClicks(kind,duration,options,performance.now()-begun);return;
+      }
+      if(kind==='contract')play('air',0,.17,.85);
+      if(kind==='coinflip')play('coin',0,.17,1.02);
       let beat=0;
       const tick=()=>{const elapsed=performance.now()-begun;if(elapsed>=duration||token!==sequence)return;const p=elapsed/duration;
-        if(kind==='case')tone(190-45*p,0,.11,.17,130);
-        if(kind==='upgrade')tone(220+p*80,0,.32,.12,246.94,'triangle');
-        if(kind==='contract')tone([261.63,329.63,392,523.25][beat%4],0,.58,.17+p*.035);
-        if(kind==='coinflip')tone(beat%2?440:329.63,0,.16,.16,beat%2?392:293.66,'triangle');
-        if(kind==='cashback')tone(beat%2?293.66:246.94,0,.14,.16,220);
-        if(kind==='battle')tone(beat%2?220:196,0,.12,.16,146.83,'triangle');
-        beat++;const gap=kind==='case'?45+165*p*p:kind==='upgrade'?290+230*p:kind==='contract'?310:kind==='cashback'?95+230*p*p:kind==='battle'?55+185*p*p:65+230*p*p;
+        if(kind==='contract')play('air',0,.13+p*.045,.85+p*.3);
+        if(kind==='coinflip')play('coin',0,.16,beat%2?1.12:.96);
+        beat++;const gap=kind==='contract'?340:85+245*p*p;
         timer=setTimeout(tick,gap);};
       timer=setTimeout(tick,kind==='contract'?520:80);
     });
@@ -1279,28 +1324,26 @@ window.CASE_IMAGES=["https://community.akamai.steamstatic.com/economy/image/i0Co
     stop();const token=sequence;
     unlock().then(ready=>{
       if(!ready||token!==sequence)return;
-      if(kind==='case'){tone(146.83,0,.24,.22);tone(293.66,.08,.4,.2);tone(440,.19,.45,.18);}
+      if(kind==='case'){play('wood',0,.2);play('reveal',.025,.26);}
       if(kind==='upgrade')(won?[329.63,415.30,493.88,659.25]:[220,164.81]).forEach((f,i)=>tone(f,i*.09,.43,won?.19:.17,undefined,'triangle'));
-      if(kind==='contract'){[261.63,329.63,392].forEach(f=>tone(f,0,.62,.16));tone(won?783.99:523.25,.17,.6,.19);}
-      if(kind==='coinflip'){tone(won?392:196,0,.3,.23,undefined,'triangle');tone(won?523.25:164.81,.055,.43,.2);}
-      if(kind==='cashback')[392,493.88,587.33].forEach((f,i)=>tone(f,i*.11,.38,.18));
-      if(kind==='cashback-drop'){tone(130.81,0,.4,.17,196,'triangle');tone(261.63,.2,.38,.14);}
-      if(kind==='cashback-open'){tone(293.66,0,.45,.18,587.33);tone(440,.13,.5,.13,659.25);}
-      if(kind==='battle-round'){tone(293.66,0,.25,.17);tone(392,.07,.3,.15);}
-      if(kind==='battle')(won?[293.66,369.99,440,587.33]:[196,146.83]).forEach((f,i)=>tone(f,i*.1,.45,.18,undefined,'triangle'));
+      if(kind==='contract'){play('glass',0,.25,.91);play('air',.055,.13,1.15);}
+      if(kind==='coinflip'){play(won?'coin':'dull',0,.23);if(won)play('coin',.085,.15,1.17);}
+      if(kind==='cashback'){play('wood',0,.18);play('glass',.025,.2,1.12);}
+      if(kind==='cashback-drop')play('latch',0,.24,.7);
+      if(kind==='cashback-open'){play('latch',0,.17,1.15);play('air',.08,.14,1.3);}
+      if(kind==='battle-round'){play('battle',0,.21);play('glass',.04,.14,.8);}
+      if(kind==='battle'){play(won?'reveal':'dull',0,.26,won?.84:.77);if(won)play('glass',.12,.18,.96);}
       if(kind==='bonus'){tone(523.25,0,.25,.17,undefined,'triangle');tone(783.99,.07,.32,.14);}
     });
   }
   function toggle(){global.Game.setSoundEnabled(!enabled());if(enabled())unlock();else stop();if(master)master.gain.setTargetAtTime(enabled()?level:0,context.currentTime,.03);return enabled();}
   function mines(event){
     stop();const token=sequence;unlock().then(ready=>{if(!ready||token!==sequence)return;
-      if(event==='start')tone(196,0,.22,.15,261.63);
-      if(event==='gem'){tone(523.25,0,.25,.23);tone(783.99,.07,.36,.18);tone(1046.5,.12,.36,.09);}
-      if(event==='cashout')[392,493.88,659.25].forEach((f,i)=>tone(f,i*.085,.42,.19));
+      if(event==='start')play('wood',0,.2,.8);
+      if(event==='gem')play('gem',0,.26);
+      if(event==='cashout'){play('gem',0,.21,.92);play('gem',.09,.18,1.15);}
       if(event==='mine'){
-        if(context.createBuffer&&context.createBufferSource){const length=.28,buffer=context.createBuffer(1,Math.ceil(context.sampleRate*length),context.sampleRate),data=buffer.getChannelData(0);for(let i=0;i<data.length;i++)data[i]=(Math.random()*2-1)*Math.exp(-i/data.length*5);
-          const source=context.createBufferSource(),gain=context.createGain(),filter=context.createBiquadFilter();source.buffer=buffer;filter.type='lowpass';filter.frequency.value=460;filter.Q.value=.5;gain.gain.setValueAtTime(.0001,context.currentTime);gain.gain.linearRampToValueAtTime(.42,context.currentTime+.012);gain.gain.exponentialRampToValueAtTime(.0001,context.currentTime+length);source.connect(filter);filter.connect(gain);gain.connect(master);const voice={osc:source,gain};voices.add(voice);source.start();source.stop(context.currentTime+length+.03);source.onended=()=>{voices.delete(voice);source.disconnect();gain.disconnect();filter.disconnect();};}
-        tone(100,0,.27,.3,38);tone(145,.03,.18,.17,55,'triangle');
+        play('impact',0,.3,.8);tone(90,0,.2,.16,38,'triangle');
       }
     });
   }
@@ -1435,7 +1478,7 @@ async function startBattle(){
   $('#battle-picker-dialog').close();busy=true;battleSession=result;battleFeedback=null;battleRevealed=0;
   for(let i=0;i<result.rounds.length;i++){
     battleRound=i;render();const round=result.rounds[i],c=CASES.find(c=>c.id===round.caseId),pool=c.drops.map(d=>G.getSkin(d.skinId)),duration=reduced?100:2600+G.random()*450;
-    Sound.start('battle',duration);await Promise.all(['player','bot'].map(side=>spinLootTrack($(`#battle-${side}-stage`),$(`#battle-${side}-track`),pool,round[side],duration,reduced?5:24)));
+    Sound.start('battle',duration,{steps:reduced?5:24});await Promise.all(['player','bot'].map(side=>spinLootTrack($(`#battle-${side}-stage`),$(`#battle-${side}-track`),pool,round[side],duration,reduced?5:24)));
     battleRevealed=i+1;updateBattleRound(result);Sound.finish('battle-round',true);await new Promise(r=>setTimeout(r,reduced?50:430));
   }
   G.finishGame(result.transactionId);busy=false;battleSession=null;battleFeedback=result;render();Sound.finish('battle',result.winner!=='bot');if(result.winner==='player')celebrateUpgrade();toast(result.winner==='player'?'Победа! Скины обоих игроков добавлены в инвентарь':result.winner==='draw'?'Ничья · твой дроп добавлен в инвентарь':'Батл выиграл NeonBot');
@@ -1556,7 +1599,7 @@ async function startCase(){
   document.querySelectorAll('[data-case-count], #fast-case, #case-dialog [data-close]').forEach(b=>b.disabled=true);
   $('#open-controls').innerHTML='<button class="button primary" disabled>Открываем…</button>';$('#case-status').textContent=fastCase?'Быстрый дроп…':'Следи за лентами. Твои дропы уже близко.';
   const targetIndex=fastCase?12:35;const duration=reduced?100:fastCase?400:4600;
-  Sound.start('case',duration);updateFundsNotice();
+  updateFundsNotice();
   const pool=c.drops.map(d=>G.getSkin(d.skinId));
   const tracks=items.map((item,index)=>{
     const stage=$(`#roulette-stage-${index}`),track=$(`#roulette-track-${index}`);
@@ -1564,6 +1607,7 @@ async function startCase(){
     track.style.transition='none';track.style.transform=`translateX(${stage.clientWidth/2-80}px)`;track.getBoundingClientRect();return {stage,track};
   });
   await new Promise(requestAnimationFrame);
+  Sound.start('case',duration,{steps:targetIndex});
   tracks.forEach(({stage,track})=>{track.style.transition=reduced?'none':`transform ${duration}ms cubic-bezier(.12,.62,.12,1)`;track.style.transform=`translateX(${stage.clientWidth/2-(targetIndex*168+80)}px)`;});
   await new Promise(r=>setTimeout(r,duration+80));busy=false;
   Sound.finish('case',true);
@@ -1613,8 +1657,8 @@ async function startUpgrade(fast=false){
   busy=true;upgradeSession=result;upgradeFeedback=null;render();
   const pointer=$('#wheel-pointer'),{duration,turns,easing}=upgradeMotion(fast);
   if(result.bonusZone.active){Sound.finish('bonus',true);await new Promise(r=>setTimeout(r,reduced?80:fast?180:350));}
-  Sound.start('upgrade',duration);
   const delta=((result.angle-result.previousAngle)%360+360)%360+turns*360;
+  Sound.start('upgrade',duration,{steps:Math.ceil(delta/45),easing:easing.match(/[\d.]+/g).map(Number)});
   pointer.style.transition='none';
   const animation=reduced?null:pointer.animate([{transform:`rotate(${result.previousAngle}deg)`},{transform:`rotate(${result.previousAngle+delta}deg)`}],{duration,easing,fill:'forwards'});
   if(animation)await animation.finished.catch(()=>{});else await new Promise(r=>setTimeout(r,duration));
@@ -1656,7 +1700,7 @@ async function animateCashback(result,fast){
   await new Promise(r=>setTimeout(r,reduced?70:fast?450:700));scene.classList.add('crate-opening');$('.cashback-status',dialog).textContent='Открываем NeonDrop…';Sound.finish('cashback-open',true);
   await new Promise(r=>setTimeout(r,reduced?70:fast?420:700));scene.classList.add('crate-opened');$('.cashback-case-roulette',dialog).hidden=false;$('.cashback-status',dialog).textContent='Стоимость узнаем после выпадения';
   const duration=reduced?100:fast?1200:2900,pool=result.cashbackOptions.map(i=>G.getSkin(i.skinId));
-  Sound.start('cashback',duration);
+  Sound.start('cashback',duration,{steps:fast?14:27});
   await spinLootTrack($('#cashback-case-stage'),$('#cashback-case-track'),pool,result.cashbackPrize,duration,fast?14:27);Sound.finish('cashback',true);
 }
 function showCashbackResult(result){
